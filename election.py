@@ -1,7 +1,8 @@
-import time
+import os
+import json
 from datetime import datetime
-import pytz
 
+import pytz
 import requests
 import pandas as pd
 import gspread
@@ -10,13 +11,9 @@ from google.oauth2.service_account import Credentials
 
 RACE_ID = 83063
 
-SERVICE_ACCOUNT_FILE = "service_account.json"
-
 SHEET_NAME = "Maine Senate Results"
 COUNTY_TAB_NAME = "Live Results by County"
 SUMMARY_TAB_NAME = "Statewide Summary"
-
-REFRESH_SECONDS = 60
 
 
 def convert_utc_to_edt(utc_timestamp):
@@ -112,8 +109,12 @@ def get_sheet_client():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    creds = Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
+    service_account_info = json.loads(
+        os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+    )
+
+    creds = Credentials.from_service_account_info(
+        service_account_info,
         scopes=scopes
     )
 
@@ -153,16 +154,6 @@ def update_google_sheet():
     county_df = build_county_df(data)
     summary_df = build_summary_df(data)
 
-    county_df.to_csv(
-        "maine_senate_county_results.csv",
-        index=False
-    )
-
-    summary_df.to_csv(
-        "maine_senate_statewide_summary.csv",
-        index=False
-    )
-
     client = get_sheet_client()
     sheet = client.open(SHEET_NAME)
 
@@ -179,7 +170,6 @@ def update_google_sheet():
     update_worksheet(county_ws, county_df)
     update_worksheet(summary_ws, summary_df)
 
-    print()
     print(f"[{datetime.utcnow().isoformat()}] Updated Google Sheet")
     print(f"County rows: {len(county_df)}")
     print(f"Summary rows: {len(summary_df)}")
@@ -189,14 +179,4 @@ def update_google_sheet():
 
 
 if __name__ == "__main__":
-    while True:
-        try:
-            update_google_sheet()
-        except Exception as e:
-            print()
-            print(f"ERROR: {e}")
-
-        print(f"Sleeping {REFRESH_SECONDS} seconds...")
-        print()
-
-        time.sleep(REFRESH_SECONDS)
+    update_google_sheet()
