@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime
+from collections import Counter
 
 import pytz
 import requests
@@ -12,8 +13,9 @@ from google.oauth2.service_account import Credentials
 RACE_ID = 83063
 
 SHEET_NAME = "Maine Senate Results"
-COUNTY_TAB_NAME = "Live Results by County"
+REGION_TAB_NAME = "Live Results by Region"
 SUMMARY_TAB_NAME = "Statewide Summary"
+DEBUG_TAB_NAME = "Debug Region Types"
 
 
 def convert_utc_to_edt(utc_timestamp):
@@ -30,6 +32,15 @@ def convert_utc_to_edt(utc_timestamp):
     return eastern_time.strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
 
+def current_sheet_update_times():
+    utc_now = datetime.utcnow().isoformat() + "Z"
+
+    eastern = pytz.timezone("America/New_York")
+    edt_now = datetime.now(eastern).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+
+    return utc_now, edt_now
+
+
 def fetch_results():
     url = f"https://civicapi.org/api/v2/race/{RACE_ID}"
 
@@ -39,20 +50,37 @@ def fetch_results():
     return resp.json()
 
 
-def build_county_df(data):
+def get_all_regions(region_results):
+    if isinstance(region_results, dict):
+        return [
+            region
+            for region in region_results.values()
+            if isinstance(region, dict)
+        ]
+
+    if isinstance(region_results, list):
+        return [
+            region
+            for region in region_results
+            if isinstance(region, dict)
+        ]
+
+    return []
+
+
+def build_region_df(data):
     rows = []
 
-    last_updated = data.get("last_updated")
-    last_updated_edt = convert_utc_to_edt(last_updated)
+    api_last_updated_utc = data.get("last_updated")
+    api_last_updated_edt = convert_utc_to_edt(api_last_updated_utc)
+
+    sheet_updated_utc, sheet_updated_edt = current_sheet_update_times()
 
     region_results = data.get("region_results", {})
-    regions = region_results.values() if isinstance(region_results, dict) else region_results
+    regions = get_all_regions(region_results)
 
     for region in regions:
-        if not isinstance(region, dict):
-            continue
-
-        if region.get("type") != "County":
+        if region.get("type") == "County":
             continue
 
         for c in region.get("candidates", []):
@@ -66,18 +94,30 @@ def build_county_df(data):
                 "votes": c.get("votes"),
                 "percent": c.get("percent"),
                 "percent_reporting": region.get("percent_reporting"),
-                "last_updated_utc": last_updated,
-                "last_updated_edt": last_updated_edt,
+                "api_last_updated_utc": api_last_updated_utc,
+                "api_last_updated_edt": api_last_updated_edt,
+                "sheet_updated_utc": sheet_updated_utc,
+                "sheet_updated_edt": sheet_updated_edt,
             })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df = df.sort_values(
+            by=["region_type", "region_name", "votes", "candidate_name"],
+            ascending=[True, True, False, True]
+        )
+
+    return df
 
 
 def build_summary_df(data):
     rows = []
 
-    last_updated = data.get("last_updated")
-    last_updated_edt = convert_utc_to_edt(last_updated)
+    api_last_updated_utc = data.get("last_updated")
+    api_last_updated_edt = convert_utc_to_edt(api_last_updated_utc)
+
+    sheet_updated_utc, sheet_updated_edt = current_sheet_update_times()
 
     for c in data.get("candidates", []):
         rows.append({
@@ -88,8 +128,10 @@ def build_summary_df(data):
             "votes": c.get("votes"),
             "percent": c.get("percent"),
             "race_percent_reporting": data.get("percent_reporting"),
-            "last_updated_utc": last_updated,
-            "last_updated_edt": last_updated_edt,
+            "api_last_updated_utc": api_last_updated_utc,
+            "api_last_updated_edt": api_last_updated_edt,
+            "sheet_updated_utc": sheet_updated_utc,
+            "sheet_updated_edt": sheet_updated_edt,
         })
 
     df = pd.DataFrame(rows)
@@ -103,20 +145,46 @@ def build_summary_df(data):
     return df
 
 
+def build_debug_region_types_df(data):
+    region_results = data.get("region_results", {})
+    regions = get_all_regions(region_results)
+
+    type_counts = Counter(
+        region.get("type", "Unknown")
+        for region in regions
+    )
+
+    rows = []
+
+    for region_type, count in sorted(type_counts.items()):
+        rows.append({
+            "region_type": region_type,
+            "count": count,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def get_sheet_client():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
 
-    service_account_info = json.loads(
-        os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-    )
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-    creds = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=scopes
-    )
+    if service_account_json:
+        service_account_info = json.loads(service_account_json)
+
+        creds = Credentials.from_service_account_info(
+            service_account_info,
+            scopes=scopes
+        )
+    else:
+        creds = Credentials.from_service_account_file(
+            "service_account.json",
+            scopes=scopes
+        )
 
     return gspread.authorize(creds)
 
@@ -124,16 +192,30 @@ def get_sheet_client():
 def get_or_create_worksheet(sheet, tab_name):
     try:
         return sheet.worksheet(tab_name)
+
     except gspread.exceptions.WorksheetNotFound:
         return sheet.add_worksheet(
             title=tab_name,
-            rows=5000,
-            cols=20
+            rows=10000,
+            cols=30
         )
+
+
+def clean_dataframe_for_sheets(df):
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df = df.replace([float("inf"), float("-inf")], "")
+    df = df.fillna("")
+
+    return df
 
 
 def update_worksheet(worksheet, df):
     worksheet.clear()
+
+    df = clean_dataframe_for_sheets(df)
 
     if df.empty:
         worksheet.update(
@@ -147,19 +229,46 @@ def update_worksheet(worksheet, df):
         range_name="A1"
     )
 
+    worksheet.freeze(rows=1)
+    worksheet.set_basic_filter()
+
+    worksheet.format("1:1", {
+        "textFormat": {"bold": True},
+        "backgroundColor": {
+            "red": 0.9,
+            "green": 0.9,
+            "blue": 0.9
+        }
+    })
+
 
 def update_google_sheet():
     data = fetch_results()
 
-    county_df = build_county_df(data)
+    region_results = data.get("region_results", {})
+    regions = get_all_regions(region_results)
+
+    region_type_counts = Counter(
+        region.get("type", "Unknown")
+        for region in regions
+    )
+
+    print("Top-level keys:", list(data.keys()))
+    print("Region results type:", type(region_results))
+    print("Region results count:", len(region_results))
+    print("Flat region count:", len(regions))
+    print("Region type counts:", region_type_counts)
+
+    region_df = build_region_df(data)
     summary_df = build_summary_df(data)
+    debug_df = build_debug_region_types_df(data)
 
     client = get_sheet_client()
     sheet = client.open(SHEET_NAME)
 
-    county_ws = get_or_create_worksheet(
+    region_ws = get_or_create_worksheet(
         sheet,
-        COUNTY_TAB_NAME
+        REGION_TAB_NAME
     )
 
     summary_ws = get_or_create_worksheet(
@@ -167,15 +276,22 @@ def update_google_sheet():
         SUMMARY_TAB_NAME
     )
 
-    update_worksheet(county_ws, county_df)
-    update_worksheet(summary_ws, summary_df)
+    debug_ws = get_or_create_worksheet(
+        sheet,
+        DEBUG_TAB_NAME
+    )
 
-    print(f"[{datetime.utcnow().isoformat()}] Updated Google Sheet")
-    print(f"County rows: {len(county_df)}")
+    update_worksheet(region_ws, region_df)
+    update_worksheet(summary_ws, summary_df)
+    update_worksheet(debug_ws, debug_df)
+
+    print(f"[{datetime.utcnow().isoformat()}Z] Updated Google Sheet")
+    print(f"Region rows excluding counties: {len(region_df)}")
     print(f"Summary rows: {len(summary_df)}")
+    print(f"Debug rows: {len(debug_df)}")
     print(f"Race reporting: {data.get('percent_reporting')}%")
-    print(f"Last updated UTC: {data.get('last_updated')}")
-    print(f"Last updated EDT: {convert_utc_to_edt(data.get('last_updated'))}")
+    print(f"API last updated UTC: {data.get('last_updated')}")
+    print(f"API last updated EDT: {convert_utc_to_edt(data.get('last_updated'))}")
 
 
 if __name__ == "__main__":
