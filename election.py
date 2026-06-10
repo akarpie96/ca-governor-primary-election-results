@@ -11,7 +11,7 @@ from google.oauth2.service_account import Credentials
 
 RACE_ID = 79777
 
-SHEET_NAME = "Maine Senate Results"
+SHEET_NAME = "CA Governor Primary Results"
 SUMMARY_TAB_NAME = "Statewide Summary"
 COUNTY_TAB_NAME = "Live Results by County"
 
