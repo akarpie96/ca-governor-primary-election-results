@@ -13,6 +13,7 @@ RACE_ID = 83063
 
 SHEET_NAME = "Maine Senate Results"
 SUMMARY_TAB_NAME = "Statewide Summary"
+TOWNSHIP_TAB_NAME = "Live Results by Township"
 
 
 def convert_utc_to_edt(utc_timestamp):
@@ -40,11 +41,69 @@ def current_sheet_update_times():
 
 def fetch_results():
     url = f"https://civicapi.org/api/v2/race/{RACE_ID}"
-
     resp = requests.get(url)
     resp.raise_for_status()
-
     return resp.json()
+
+
+def get_all_regions(region_results):
+    if isinstance(region_results, dict):
+        return [
+            region
+            for region in region_results.values()
+            if isinstance(region, dict)
+        ]
+
+    if isinstance(region_results, list):
+        return [
+            region
+            for region in region_results
+            if isinstance(region, dict)
+        ]
+
+    return []
+
+
+def build_township_df(data):
+    rows = []
+
+    api_last_updated_utc = data.get("last_updated")
+    api_last_updated_edt = convert_utc_to_edt(api_last_updated_utc)
+
+    sheet_updated_utc, sheet_updated_edt = current_sheet_update_times()
+
+    regions = get_all_regions(data.get("region_results", {}))
+
+    for region in regions:
+        if region.get("type") != "Township":
+            continue
+
+        for c in region.get("candidates", []):
+            rows.append({
+                "race_id": RACE_ID,
+                "election_name": data.get("election_name"),
+                "township_name": region.get("name"),
+                "region_type": region.get("type"),
+                "candidate_name": c.get("name"),
+                "party": c.get("party"),
+                "votes": c.get("votes"),
+                "percent": c.get("percent"),
+                "percent_reporting": region.get("percent_reporting"),
+                "api_last_updated_utc": api_last_updated_utc,
+                "api_last_updated_edt": api_last_updated_edt,
+                "sheet_updated_utc": sheet_updated_utc,
+                "sheet_updated_edt": sheet_updated_edt,
+            })
+
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df = df.sort_values(
+            by=["township_name", "votes", "candidate_name"],
+            ascending=[True, False, True]
+        )
+
+    return df
 
 
 def build_summary_df(data):
@@ -112,8 +171,8 @@ def get_or_create_worksheet(sheet, tab_name):
     except gspread.exceptions.WorksheetNotFound:
         return sheet.add_worksheet(
             title=tab_name,
-            rows=1000,
-            cols=20
+            rows=10000,
+            cols=30
         )
 
 
@@ -162,6 +221,7 @@ def update_google_sheet():
     data = fetch_results()
 
     summary_df = build_summary_df(data)
+    township_df = build_township_df(data)
 
     client = get_sheet_client()
     sheet = client.open(SHEET_NAME)
@@ -171,10 +231,17 @@ def update_google_sheet():
         SUMMARY_TAB_NAME
     )
 
+    township_ws = get_or_create_worksheet(
+        sheet,
+        TOWNSHIP_TAB_NAME
+    )
+
     update_worksheet(summary_ws, summary_df)
+    update_worksheet(township_ws, township_df)
 
     print(f"[{datetime.utcnow().isoformat()}Z] Updated Google Sheet")
     print(f"Summary rows: {len(summary_df)}")
+    print(f"Township rows: {len(township_df)}")
     print(f"Race reporting: {data.get('percent_reporting')}%")
     print(f"API last updated UTC: {data.get('last_updated')}")
     print(f"API last updated EDT: {convert_utc_to_edt(data.get('last_updated'))}")
