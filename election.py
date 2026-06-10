@@ -9,11 +9,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 
-RACE_ID = 83063
+RACE_ID = 79777
 
 SHEET_NAME = "Maine Senate Results"
 SUMMARY_TAB_NAME = "Statewide Summary"
-TOWNSHIP_TAB_NAME = "Live Results by Township"
+COUNTY_TAB_NAME = "Live Results by County"
 
 
 def convert_utc_to_edt(utc_timestamp):
@@ -64,7 +64,7 @@ def get_all_regions(region_results):
     return []
 
 
-def build_township_df(data):
+def build_county_df(data):
     rows = []
 
     api_last_updated_utc = data.get("last_updated")
@@ -75,14 +75,14 @@ def build_township_df(data):
     regions = get_all_regions(data.get("region_results", {}))
 
     for region in regions:
-        if region.get("type") != "Township":
+        if region.get("type") != "County":
             continue
 
         for c in region.get("candidates", []):
             rows.append({
                 "race_id": RACE_ID,
                 "election_name": data.get("election_name"),
-                "township_name": region.get("name"),
+                "county_name": region.get("name"),
                 "region_type": region.get("type"),
                 "candidate_name": c.get("name"),
                 "party": c.get("party"),
@@ -99,7 +99,7 @@ def build_township_df(data):
 
     if not df.empty:
         df = df.sort_values(
-            by=["township_name", "votes", "candidate_name"],
+            by=["county_name", "votes", "candidate_name"],
             ascending=[True, False, True]
         )
 
@@ -221,7 +221,7 @@ def update_google_sheet():
     data = fetch_results()
 
     summary_df = build_summary_df(data)
-    township_df = build_township_df(data)
+    county_df = build_county_df(data)
 
     client = get_sheet_client()
     sheet = client.open(SHEET_NAME)
@@ -231,17 +231,17 @@ def update_google_sheet():
         SUMMARY_TAB_NAME
     )
 
-    township_ws = get_or_create_worksheet(
+    county_ws = get_or_create_worksheet(
         sheet,
-        TOWNSHIP_TAB_NAME
+        COUNTY_TAB_NAME
     )
 
     update_worksheet(summary_ws, summary_df)
-    update_worksheet(township_ws, township_df)
+    update_worksheet(county_ws, county_df)
 
     print(f"[{datetime.utcnow().isoformat()}Z] Updated Google Sheet")
     print(f"Summary rows: {len(summary_df)}")
-    print(f"Township rows: {len(township_df)}")
+    print(f"County rows: {len(county_df)}")
     print(f"Race reporting: {data.get('percent_reporting')}%")
     print(f"API last updated UTC: {data.get('last_updated')}")
     print(f"API last updated EDT: {convert_utc_to_edt(data.get('last_updated'))}")
